@@ -4,9 +4,10 @@ Connect-AzAccount
 # Select your subscription if needed
 # Set-AzContext -SubscriptionId "<your-subscription-id>"
 
-# Get all Arc-enabled Windows servers
+# Get all Arc-enabled Windows servers with the specific tag
 $windowsArcMachines = Get-AzConnectedMachine | Where-Object {
-    $_.OsType -eq 'Windows'
+    $_.OsType -eq 'Windows' -and 
+    $_.Tags.force_defender_av_from_passive_to_active -eq 'true'
 }
 
 # Script to force Microsoft Defender AV to active mode
