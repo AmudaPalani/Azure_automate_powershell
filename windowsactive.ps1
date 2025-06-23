@@ -1,49 +1,56 @@
-# Connect to Azure and Microsoft Graph
+# Connect to Azure
 Connect-AzAccount
-Connect-MgGraph -Scopes "Device.ReadWrite.All"
 
-Install-Module -Name Az.ConnectedMachine -AllowClobber -Force
+# Select your subscription if needed
+# Set-AzContext -SubscriptionId "<your-subscription-id>"
 
-# Get all Azure arc servers that are windows servers
-$windowsServers = Get-AzConnectedMachine | Where-Object { $_.OsType -eq "Windows" }
+# Get all Arc-enabled Windows servers
+$windowsArcMachines = Get-AzConnectedMachine | Where-Object {
+    $_.OsType -eq 'Windows'
+}
 
-# Loop through each server and update the device
-foreach ($server in $windowsServers) {
+# Script to force Microsoft Defender AV to active mode
+$defenderActivationScript = @"
+# Check for third-party antivirus products
+Write-Output "Checking for existing antivirus products..."
+`$avProducts = Get-WmiObject -Namespace 'root\SecurityCenter2' -Class 'AntiVirusProduct' -ErrorAction SilentlyContinue
+`$thirdPartyAV = `$avProducts | Where-Object { `$_.displayName -notlike '*Windows Defender*' -and `$_.displayName -notlike '*Microsoft Defender*' }
 
-    $serverId = $server.Id
+if (`$thirdPartyAV) {
+    Write-Output "⚠️ Third-party AV detected: `$(`$thirdPartyAV.displayName -join ', ')"
+    Write-Output "Skipping Microsoft Defender activation to avoid conflicts"
+} else {
+    Write-Output "No third-party AV detected"
+    Write-Output "Forcing Microsoft Defender to active mode..."
     
-    # Step 1: Enable Microsoft Defender Antivirus (base component first)
-    $defenderAntivirus = Get-MgDeviceManagementWindowsDefender -DeviceId $serverId
-    if ($defenderAntivirus) {
-        $defenderAntivirus.IsEnabled = $true
-        Update-MgDeviceManagementWindowsDefender -DeviceId $serverId -IsEnabled $defenderAntivirus.IsEnabled
-        Write-Host "Enabled Microsoft Defender Antivirus on device: $($server.Name)."
-    }
-    else {
-        Write-Host "Microsoft Defender Antivirus not found for server: $($server.Name)"
-    }
+    # Force Defender to active mode
+    Set-MpPreference -DisableRealtimeMonitoring `$false
     
-    # Step 2: Enable Microsoft Defender for Endpoint (advanced protection)
-    $defenderEndpoint = Get-MgDeviceManagementWindowsDefenderAdvancedThreatProtection -DeviceId $serverId
-    if ($defenderEndpoint) {
-        $defenderEndpoint.IsEnabled = $true
-        Update-MgDeviceManagementWindowsDefenderAdvancedThreatProtection -DeviceId $serverId -IsEnabled $defenderEndpoint.IsEnabled
-        Write-Host "Enabled Microsoft Defender for Endpoint on device: $($server.Name)."
-    }
-    else {
-        Write-Host "Microsoft Defender for Endpoint not found for server: $($server.Name)"
-    }
-    
-    # Step 3: Switch Microsoft Defender Antivirus (MDAV) from Passive Mode to Active Mode (final step)
-    $device = Get-MgDevice -Filter "id eq '$serverId'"
-    if ($device) {
-        $device.DeviceManagementAppId = "Microsoft Defender Antivirus"
-        $device.DeviceManagementAppVersion = "Active"
-        Update-MgDevice -DeviceId $serverId -DeviceManagementAppId $device.DeviceManagementAppId -DeviceManagementAppVersion $device.DeviceManagementAppVersion
-        Write-Host "Updated device: $($server.Name) to Active Mode."
-    }
-    else {
-        Write-Host "Device not found for server: $($server.Name)"
-    }
+    Write-Output "✅ Microsoft Defender forced to active mode"
+}
 
+# Get current Defender status for verification
+`$mpStatus = Get-MpComputerStatus
+Write-Output "Current Defender Status:"
+Write-Output "  Real-time Protection: `$(`$mpStatus.RealTimeProtectionEnabled)"
+Write-Output "  AntiSpyware: `$(`$mpStatus.AntiSpywareEnabled)"
+Write-Output "  Behavior Monitor: `$(`$mpStatus.BehaviorMonitorEnabled)"
+"@
+
+# Loop through each Arc-enabled Windows machine and invoke the script
+foreach ($machine in $windowsArcMachines) {
+    Write-Host "Applying Defender AV settings on $($machine.Name)..."
+
+    try {
+        Invoke-AzConnectedMachineCommand `
+            -ResourceGroupName $machine.ResourceGroupName `
+            -MachineName $machine.Name `
+            -CommandId 'RunPowerShellScript' `
+            -ScriptString $defenderActivationScript
+
+        Write-Host "✅ Successfully invoked on $($machine.Name)"
+    }
+    catch {
+        Write-Warning "❌ Failed to invoke on $($machine.Name): $_"
+    }
 }
